@@ -818,7 +818,7 @@ class Scene3D: SKScene, BossControllerDelegate, Bonus3DScene, SKTouchResponder, 
                 worldH = 0.5
                 case Strings.Tile.printerChar, Strings.Tile.faxChar, Strings.Tile.coverSheetChar,
                      Strings.Tile.bookBinderChar, Strings.Tile.brownBoxChar:
-                    node = emojiBillboard(SpriteFactory.machineEmoji(for: ch)!, 128)
+                    node = SpriteFactory.machineEmoji(for: ch).map { emojiBillboard($0, 128) }
                     worldH = tpsEmojiWorldH
                 default: continue
                 }
@@ -1246,6 +1246,7 @@ class Scene3D: SKScene, BossControllerDelegate, Bonus3DScene, SKTouchResponder, 
 
     // MARK: - Per-frame
     override func update(_ currentTime: TimeInterval) {
+        guard bossController != nil else { return }
         if lastUpdateTime == 0 { lastUpdateTime = currentTime }
         let dt = min(currentTime - lastUpdateTime, 1.0 / 20.0)
         lastUpdateTime = currentTime

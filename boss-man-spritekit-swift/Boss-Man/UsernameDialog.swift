@@ -210,7 +210,8 @@ final class UsernameDialog: SKNode {
     // true when the click landed on a button (consumed), false otherwise.
     @discardableResult
     func handleMouseDown(at scenePoint: CGPoint) -> Bool {
-        let local = convert(scenePoint, from: scene!)
+        guard let scene else { return false }
+        let local = convert(scenePoint, from: scene)
         // Save button rect (in panel-local coords): same geometry the
         // buildUI lays down for the blue rounded button.
         let saveRect = CGRect(x: -100, y: -panelSize.height / 2 + 18,

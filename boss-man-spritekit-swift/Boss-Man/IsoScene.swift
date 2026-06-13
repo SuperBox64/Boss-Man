@@ -212,7 +212,8 @@ final class IsoScene: Scene3D, WorkerControllerDelegate {
                 case Strings.Tile.waterGunChar:    node = throbbing(emojiBillboard(Strings.Emoji.waterGun, s), 1.18, 0.5)
                 case Strings.Tile.printerChar, Strings.Tile.faxChar, Strings.Tile.coverSheetChar,
                      Strings.Tile.bookBinderChar, Strings.Tile.brownBoxChar:
-                    node = emojiBillboard(SpriteFactory.machineEmoji(for: row[c])!, s)
+                    guard let emoji = SpriteFactory.machineEmoji(for: row[c]) else { continue }
+                    node = emojiBillboard(emoji, s)
                 case Strings.Tile.waterPelletChar: node = throbbing(SpriteFactory.waterPelletVisual(radius: isoTW * 0.3), 1.25, 0.5)
                 case Strings.Tile.goldDiscChar:    node = throbbing(SpriteFactory.goldDiscVisual(radius: isoTW * 0.34), 1.18, 0.5)
                 default: continue
@@ -622,8 +623,9 @@ final class IsoScene: Scene3D, WorkerControllerDelegate {
                 prevWall = true
             }
             if firstHit { zbuf[col] = 1e9 }
-            for fid in Array(openF.keys) where openF[fid]!.lastCol < col {
-                emitFront(openF[fid]!)
+            for fid in Array(openF.keys) {
+                guard let run = openF[fid], run.lastCol < col else { continue }
+                emitFront(run)
                 openF.removeValue(forKey: fid)
             }
         }
