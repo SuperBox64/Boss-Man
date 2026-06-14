@@ -28,11 +28,14 @@ let package = Package(
                 .product(name: "AVFoundation",   package: "SuperBox64Kit"),
             ],
             swiftSettings: [
-                // Match Apple's implicit model: the game is @MainActor by
-                // default, so apple source (which is @MainActor) compiles
-                // unchanged. The @_cdecl boot/frame entry points opt out with
-                // `nonisolated` and bridge in via MainActor.assumeIsolated.
-                .defaultIsolation(MainActor.self),
+                // Swift 5 language mode (same as UFO-Emoji-Arcade's web target):
+                // relaxed concurrency checking so the game's SKNode subclasses
+                // compile against the kit's (currently nonisolated) SpriteKit.
+                // The kit isn't yet @MainActor-isolated like Apple's SpriteKit
+                // (that's a larger refactor — it would cascade through every
+                // CoreGraphics value type); .defaultIsolation(MainActor.self)
+                // requires that and is the eventual Apple-faithful target.
+                .swiftLanguageMode(.v5),
             ],
             linkerSettings: [
                 .unsafeFlags([
