@@ -136,16 +136,18 @@ enum SpriteFactory {
     // base * factor, dithered for the given output row (opaque).
     static func ditheredShade(of base: SKColor, factor: CGFloat, row: Int) -> SKColor {
         let t = ditherThreshold(row)
-        return SKColor(red:   ditherQuant(base.redComponent * factor, t),
-                       green: ditherQuant(base.greenComponent * factor, t),
-                       blue:  ditherQuant(base.blueComponent * factor, t),
+        let rgb = base.usingColorSpace(.deviceRGB) ?? base
+        return SKColor(red:   ditherQuant(rgb.redComponent * factor, t),
+                       green: ditherQuant(rgb.greenComponent * factor, t),
+                       blue:  ditherQuant(rgb.blueComponent * factor, t),
                        alpha: 1)
     }
     // Fixed colour with a dithered alpha ramp for the given output row.
     static func ditheredAlpha(of base: SKColor, alpha: CGFloat, row: Int) -> SKColor {
         let t = ditherThreshold(row)
-        return SKColor(red: base.redComponent, green: base.greenComponent,
-                       blue: base.blueComponent, alpha: ditherQuant(alpha, t))
+        let rgb = base.usingColorSpace(.deviceRGB) ?? base
+        return SKColor(red: rgb.redComponent, green: rgb.greenComponent,
+                       blue: rgb.blueComponent, alpha: ditherQuant(alpha, t))
     }
     static let wallTrimColor   = SKColor.systemGray
     static let mazeBackground  = SKColor(calibratedRed: 0.06, green: 0.06, blue: 0.07, alpha: 1)

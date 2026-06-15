@@ -133,6 +133,7 @@ final class SoundManager {
         applySpeechVoicePreferences(preferred: Strings.Speech.preferredVoiceNames,
                                     robotic: Strings.Speech.roboticVoiceNames,
                                     female: Strings.Speech.femaleVoiceNames)
+        prewarmSpeech()
     }
 
 
@@ -850,6 +851,27 @@ final class SoundManager {
     }
 
     // MARK: - Voice
+    private static let warmUpText = "boss man"
+
+    #if os(macOS)
+    nonisolated(unsafe) private static var warmSynth: AVSpeechSynthesizer?
+    static func warmUpSpeechEngine() {
+        let synth = AVSpeechSynthesizer()
+        let warm = AVSpeechUtterance(string: warmUpText)
+        warm.voice = pickBossVoice()
+        warm.volume = 0
+        synth.speak(warm)
+        warmSynth = synth
+    }
+    #endif
+
+    private func prewarmSpeech() {
+        let warm = AVSpeechUtterance(string: SoundManager.warmUpText)
+        warm.voice = voice
+        warm.volume = 0
+        speech.speak(warm)
+    }
+
     @discardableResult
     private func speak(_ text: String, priority: Bool) -> TimeInterval {
         let now = CACurrentMediaTime()

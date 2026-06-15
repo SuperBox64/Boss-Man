@@ -33,6 +33,7 @@ final class DoomScene: Scene3D {
 
     override func projectSprites(dirX: Double, dirY: Double, planeX: Double, planeY: Double) {
         resetVisPool()
+        for (_, l) in bossNames { l.isHidden = true }
         let invDet = 1.0 / (planeX * dirY - dirX * planeY)
 
         for b in billboards where b.alive {
@@ -133,8 +134,13 @@ final class DoomScene: Scene3D {
                 let tX = invDet * (dirY * relX - dirX * relY)
                 let tY = invDet * (-planeY * relX + planeX * relY)
                 if tY > 0.15, tY <= 18 {
+                    let col = Int((size.width / 2) * CGFloat(1 + tX / tY) / (size.width / CGFloat(columns)))
+                    let colC = max(0, min(columns - 1, col))
+                    let footHalf = max(1, min(5, Int((viewH / CGFloat(tY) * 0.42) / (size.width / CGFloat(columns)) * 0.5)))
+                    var wallZ = zbuf[colC]
+                    for c in max(0, colC - footHalf)...min(columns - 1, colC + footHalf) { wallZ = min(wallZ, zbuf[c]) }
                     let screenX = (size.width / 2) * CGFloat(1 + tX / tY)
-                    if screenX > -60, screenX < size.width + 60 {
+                    if tY <= wallZ + 0.3, screenX > -60, screenX < size.width + 60 {
                         let v = getVisItem()
                         v.node = m
                         v.nativeH = travelerNativeH
@@ -208,6 +214,6 @@ final class DoomScene: Scene3D {
         updateMapTravelerMirror()
     }
 
-    override func makeRestartScene() -> Scene3D { VoxelScene(size: size) }
+    override func makeRestartScene() -> Scene3D { DoomScene(size: size) }
 }
 

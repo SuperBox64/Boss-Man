@@ -929,7 +929,18 @@ class Scene3D: SKScene, BossControllerDelegate, Bonus3DScene, SKTouchResponder, 
         node.position = CGPoint(x: size.width / 2, y: peteBaseY)
         node.zPosition = 500
         for e in bossController.entities where e.node !== node { e.node.isHidden = true }
-        for (_, l) in bossNames { l.isHidden = true }
+        let catcherID = ObjectIdentifier(node)
+        for (id, l) in bossNames where id != catcherID { l.isHidden = true }
+        peteName.isHidden = true
+        if let name = bossController.entities.first(where: { $0.node === node })?.name {
+            let s = viewH * 0.42 / nh
+            let feet = bossFeet[catcherID] ?? -nh / 2
+            let label = bossNameplate(for: node, text: name)
+            label.fontColor = .white
+            label.isHidden = false
+            label.fontSize = max(13, min(24, viewH * 0.42 * 0.16))
+            label.position = CGPoint(x: size.width / 2, y: peteBaseY + (feet + nh) * s + label.fontSize * 0.7)
+        }
         for s in shots { s.node.isHidden = true }
         deathTimeLeft = Double(deathFrames) / 60.0
     }
@@ -942,6 +953,7 @@ class Scene3D: SKScene, BossControllerDelegate, Bonus3DScene, SKTouchResponder, 
     func finishDeath() {
         dying = false                                 // projectSprites re-scales/re-shows every billboard on resume
         for (_, l) in bossNames { l.isHidden = false }
+        peteName.isHidden = false
         state.lives -= 1
         refreshHUD()
         if state.lives <= 0 {
