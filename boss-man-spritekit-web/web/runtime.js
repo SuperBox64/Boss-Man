@@ -120,10 +120,52 @@ const CFG = Object.assign({
   assetRoot: '../assets', // where preloaded assets + manifest.json live
   canvasId: 'game',       // <canvas> element id
   title: null,            // optional document.title
+  cacheBust: '',          // build token; appended as ?v=... to every fetch so a
+                          // rebuilt wasm/asset is never served stale from cache
 }, (typeof window !== 'undefined' && window.WASMWEB) || {});
 
 const LOGICAL_W = CFG.logicalWidth;
 const LOGICAL_H = CFG.logicalHeight;
+
+// Cache-bust suffix appended to wasm + every asset fetch. Browsers cache
+// runtime.js / *.wasm / assets aggressively by filename; without a per-build
+// token a rebuild silently serves the OLD files (the recurring "I fixed it but
+// nothing changed" trap). build.sh stamps CFG.cacheBust with the build time.
+const BUST = CFG.cacheBust ? ('?v=' + encodeURIComponent(CFG.cacheBust)) : '';
+const bust = (url) => url + (BUST && !url.includes('?') ? BUST : '');
+
+// Text-default emoji (Emoji=Yes, Emoji_Presentation=No): Canvas2D renders these
+// as B&W glyphs unless followed by U+FE0F. The game stores some bare (e.g. ⛰
+// U+26F0 renders as a white silhouette). We append FE0F to force colour emoji.
+// Curated to game-relevant symbols; excludes ©®™ and keycap bases so HUD/text
+// is untouched.
+const TEXT_DEFAULT_EMOJI = new Set([
+  0x26F0, // ⛰ mountain
+  0x26FA, // ⛺ tent
+  0x26EA, // ⛪ church
+  0x26F2, // ⛲ fountain
+  0x26F5, // ⛵ boat (usually emoji, harmless)
+  0x2618, // ☘ shamrock
+  0x2600, 0x2601, // ☀ ☁
+  0x2602, // ☂ umbrella
+  0x2614, // ☔
+  0x26C8, // ⛈
+  0x2744, // ❄ snowflake
+  0x2728, // ✨ (emoji default, harmless)
+  0x2604, // ☄ comet
+  0x2702, // ✂ scissors
+  0x2708, // ✈ airplane
+  0x2709, // ✉ envelope
+  0x270F, // ✏ pencil
+  0x2712, // ✒ pen
+  0x2692, 0x2694, 0x2696, 0x2697, 0x2699, // ⚒⚔⚖⚗⚙
+  0x26CF, 0x26D1, 0x26D3, // ⛏⛑⛓
+  0x26E9, // ⛩ shrine
+  0x26F1, // ⛱
+  0x2620, // ☠ skull&crossbones
+  0x2622, 0x2623, // ☢☣
+  0x269C, // ⚜
+]);
 
 // iOS Safari only lets Web Speech run inside a user gesture, so event-driven game
 // voice lines never play reliably. Disable TTS (and its priming) on iOS entirely.
@@ -207,7 +249,39 @@ class Runtime {
     this.imageByName = new Map();
     this.soundByName = new Map();
     this.fontByName = new Map();
+    // iOS/macOS system fonts the game names by their UIFont family string but
+    // that ship with the OS (NOT bundled as .ttf). SpriteKit resolves these on
+    // device; the browser does too, since Safari/macOS carry the same families.
+    // Pre-register each so SKLabelNode.fontName resolves to the real face — e.g.
+    // the title-screen copyright is "AmericanTypewriter" — instead of falling
+    // through to the monospace default. Key is registered both verbatim and via
+    // basename(), and matching is space-insensitive (see lookupFont).
+    for (const [name, family] of [
+      ['AmericanTypewriter', '"American Typewriter", "AmericanTypewriter", Courier, monospace'],
+      ['Courier',            'Courier, "Courier New", monospace'],
+      ['CourierNew',         '"Courier New", Courier, monospace'],
+      ['Helvetica',          'Helvetica, Arial, sans-serif'],
+      ['HelveticaNeue',      '"Helvetica Neue", Helvetica, Arial, sans-serif'],
+      ['ArialMT',            'Arial, Helvetica, sans-serif'],
+      ['Arial',              'Arial, Helvetica, sans-serif'],
+      ['ChalkboardSE-Regular', '"Chalkboard SE", "Comic Sans MS", cursive'],
+      ['MarkerFelt-Thin',    '"Marker Felt", "Comic Sans MS", cursive'],
+      ['TimesNewRomanPSMT',  '"Times New Roman", Times, serif'],
+      ['Menlo-Regular',      'Menlo, monospace'],
+    ]) {
+      this.fonts.push(family);
+      const h = this.fonts.length - 1;
+      this.fontByName.set(name, h);
+      this.fontByName.set(name.replace(/[\s-]/g, '').toLowerCase(), h);
+    }
     this.texts = new Map();   // text assets (levels.json, ...) for asset_text
+    // Rasterized-glyph cache: maps "font|size|baseline|rgba|string" to a small
+    // offscreen canvas holding the rendered text. Canvas2D color-emoji fillText
+    // is very expensive; an emoji-heavy scene (dozens of SKLabelNode actors)
+    // re-rasterizing every frame collapses to single-digit fps. We rasterize a
+    // string once and blit the bitmap thereafter — same output, ~free redraws.
+    this._glyphCache = new Map();
+    this._glyphCacheCap = 512;
 
     // ---- audio ----
     this.audioCtx = null;
@@ -245,6 +319,114 @@ class Runtime {
   dv() { return new DataView(this.wasmMemory.buffer); }
   u8(ptr, len) { return new Uint8Array(this.wasmMemory.buffer, ptr, len); }
   cstr(ptr, len) { return this.textDecoder.decode(this.u8(ptr, len)); }
+
+  // Force colour emoji on text-default codepoints (append U+FE0F) so e.g. ⛰
+  // doesn't render as a white silhouette. Fast-pathed: only rebuilds the string
+  // when it actually contains a candidate scalar.
+  emojify(s) {
+    if (!s || s.length < 1) return s;
+    let hit = false;
+    for (let i = 0; i < s.length; i++) {
+      const cp = s.codePointAt(i);
+      if (cp > 0xFFFF) i++;
+      if (TEXT_DEFAULT_EMOJI.has(cp)) { hit = true; break; }
+    }
+    if (!hit) return s;
+    const cps = Array.from(s);
+    let out = '';
+    for (let i = 0; i < cps.length; i++) {
+      out += cps[i];
+      if (TEXT_DEFAULT_EMOJI.has(cps[i].codePointAt(0)) && cps[i + 1] !== '️') out += '️';
+    }
+    return out;
+  }
+
+  // Debug HUD: live FPS, per-frame image/text draw counts, and wasm frame() ms.
+  // Draws straight on the backing canvas in device pixels (identity transform)
+  // after the wasm render, so it sits on top of everything.
+  drawFpsOverlay() {
+    const c = this.ctx;
+    if (!c) return;
+    // Compose the HUD from the SKView flags the kit pushed via dbg_set_overlays:
+    // bit0 = showsFPS, bit1 = showsDrawCount. Nothing on -> draw nothing (Apple
+    // default of showsFPS/showsDrawCount = false).
+    const flags = this._overlayFlags | 0;
+    if (flags === 0) return;
+    const fps = this._fps || 0;
+    const parts = [];
+    if (flags & 1) parts.push(`FPS ${fps.toFixed(0)}  frame ${(this._frameMs||0).toFixed(1)}ms`);
+    if (flags & 2) parts.push(`img ${this._dcImg|0}  txt ${this._dcTxt|0}`);
+    const txt = parts.join('  ');
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalAlpha = 1;
+    c.filter = 'none';
+    c.font = '16px monospace';
+    c.textAlign = 'left';
+    c.textBaseline = 'top';
+    const w = c.measureText(txt).width + 16;
+    c.fillStyle = 'rgba(0,0,0,0.7)';
+    c.fillRect(6, 6, w, 26);
+    c.fillStyle = fps >= 50 ? '#3f6' : fps >= 30 ? '#fd0' : '#f44';
+    c.fillText(txt, 14, 11);
+    c.restore();
+  }
+
+  // Rasterize a text string into its own offscreen canvas at DEVICE resolution
+  // (logical ink bounds × ds), so blitting it back through the baseScale
+  // transform at logical size stays pixel-crisp on retina/hi-DPR backings — the
+  // prior 1x rasterize-then-upscale was the source of the emoji blur. Returns
+  // { canvas, ox, oy, dw, dh } where (ox,oy) is the LOGICAL offset from the draw
+  // pen (x,y) to where the canvas top-left should land, and (dw,dh) is the
+  // canvas's LOGICAL footprint, so drawImage(canvas, x+ox, y+oy, dw, dh)
+  // reproduces fillText(s,x,y) under the given baseline mode (0=alphabetic,
+  // 1=middle, 2=top, 3=bottom). ds is the device-pixel scale (>=1). Returns
+  // null for empty strings or on any rasterize failure (caller falls back).
+  _rasterizeText(font, s, sizePx, mode, rgba, ds) {
+    if (!s) return null;
+    const meas = this.ctx2d();
+    this.applyFont(meas, font, sizePx, 0);
+    const m = meas.measureText(s);
+    // Logical ink metrics (fall back to em-box estimates when the engine omits
+    // the actualBoundingBox* fields, e.g. very old Safari).
+    const ascent  = (m.actualBoundingBoxAscent  != null && isFinite(m.actualBoundingBoxAscent))  ? m.actualBoundingBoxAscent  : sizePx * 0.9;
+    const descent = (m.actualBoundingBoxDescent != null && isFinite(m.actualBoundingBoxDescent)) ? m.actualBoundingBoxDescent : sizePx * 0.3;
+    const left    = (m.actualBoundingBoxLeft    != null && isFinite(m.actualBoundingBoxLeft))    ? m.actualBoundingBoxLeft    : 0;
+    const right   = (m.actualBoundingBoxRight   != null && isFinite(m.actualBoundingBoxRight))   ? m.actualBoundingBoxRight   : m.width;
+    const pad = 2;                                   // logical pad around the ink
+    const wL = Math.max(1, Math.ceil(left + right) + pad * 2);   // logical canvas w
+    const hL = Math.max(1, Math.ceil(ascent + descent) + pad * 2); // logical canvas h
+    // Device-pixel canvas size; clamp so a runaway scale can never allocate a
+    // multi-GB bitmap (8192 matches the SVG raster cap).
+    const wD = Math.max(1, Math.min(Math.ceil(wL * ds), 8192));
+    const hD = Math.max(1, Math.min(Math.ceil(hL * ds), 8192));
+    let cv, cc;
+    try {
+      cv = document.createElement('canvas');
+      cv.width = wD; cv.height = hD;
+      cc = cv.getContext('2d');
+      if (!cc) return null;
+    } catch (_e) { return null; }
+    // Draw at device scale: everything below is in logical units, pre-scaled.
+    cc.setTransform(ds, 0, 0, ds, 0, 0);
+    this.applyFont(cc, font, sizePx, 0);
+    cc.textAlign = 'left';
+    cc.textBaseline = 'alphabetic';
+    cc.fillStyle = this.css(rgba);
+    const penX = pad + left;      // logical pen x inside canvas (ink left at pad)
+    const penY = pad + ascent;    // logical alphabetic baseline inside canvas
+    try { cc.fillText(s, penX, penY); } catch (_e) { return null; }
+    // baselineY = where the alphabetic baseline sits relative to the draw pen y,
+    // per the same rules the direct gfx_draw_text path uses (logical units).
+    let baselineY;
+    switch (mode) {
+      case 1:  baselineY = (ascent - descent) / 2; break; // middle (visual centre)
+      case 2:  baselineY = ascent;  break;                 // top
+      case 3:  baselineY = -descent; break;                // bottom
+      default: baselineY = 0;                              // alphabetic
+    }
+    return { canvas: cv, ox: -left - pad, oy: baselineY - penY, dw: wL, dh: hL };
+  }
 
   // ==========================================================================
   // WASI preview1 (only what the binary imports)
@@ -418,8 +600,9 @@ class Runtime {
         const c = this.ctx2d();
         c.globalAlpha = 1;   // SFML carries alpha in the fill/vertex colour; never inherit a leaked globalAlpha (it washed opaque shape fills out)
         switch (mode) {
-          case 1: c.globalCompositeOperation = 'lighter'; break;
-          case 2: c.globalCompositeOperation = 'multiply'; break;
+          case 1: c.globalCompositeOperation = 'lighter'; break;   // SKBlendMode.add
+          case 2: c.globalCompositeOperation = 'multiply'; break;  // SKBlendMode.multiply
+          case 3: c.globalCompositeOperation = 'screen'; break;    // SKBlendMode.screen (glowing particles, e.g. the white-hole)
           default: c.globalCompositeOperation = 'source-over'; break;
         }
       },
@@ -437,6 +620,10 @@ class Runtime {
         c.strokeRect(x, y, w, h);
       },
       gfx_fill_circle: (cx, cy, r, rgba) => {
+        // ctx.arc throws IndexSizeError on a negative/NaN radius (a physics body
+        // whose sprite texture came in undersized can compute a negative radius).
+        // Guard so one bad body can't abort the whole frame.
+        if (!(r > 0) || !isFinite(cx) || !isFinite(cy)) return;
         const c = this.ctx2d();
         c.fillStyle = this.css(rgba);
         c.beginPath();
@@ -444,6 +631,7 @@ class Runtime {
         c.fill();
       },
       gfx_stroke_circle: (cx, cy, r, thickness, rgba) => {
+        if (!(r > 0) || !isFinite(cx) || !isFinite(cy)) return;
         const c = this.ctx2d();
         c.lineWidth = thickness;
         c.strokeStyle = this.css(rgba);
@@ -482,13 +670,40 @@ class Runtime {
 
       // ---- textured quad ----
       gfx_draw_image: (img, sx, sy, sw, sh, dx, dy, dw, dh, rgba) => {
+        this._dcImg = (this._dcImg | 0) + 1;
         const rec = this.images[img];
         if (!rec) return;
         const c = this.ctx2d();
         const a = (rgba & 0xFF) / 255;
         const prevAlpha = c.globalAlpha;
         c.globalAlpha = prevAlpha * a;
+        // RGB tint (SpriteKit colorBlendFactor / particleColor): when the tint
+        // is not white, multiply the texture's colours by it (masked by the
+        // texture's own alpha) so SKEmitterNode particles take their .sks colour
+        // instead of the raw texture. White (0xFFFFFFxx) means 'no tint' -> the
+        // existing fast paths below. Applies to BOTH raster and SVG textures
+        // (the hit particle 🥛🍞🥚 ships as SVG) so the colour is actually visible.
+        const tr = (rgba >>> 24) & 0xFF, tg = (rgba >>> 16) & 0xFF, tb = (rgba >>> 8) & 0xFF;
+        const tinted = (tr !== 255 || tg !== 255 || tb !== 255);
         try {
+          // Vector (SVG) textures rasterize on demand at the exact device-pixel
+          // footprint of the destination rect, so they stay crisp at any camera
+          // zoom or devicePixelRatio with zero quality loss. Embedded <image>
+          // bitmaps, <clipPath> and <mask> are rendered by the browser's own
+          // SVG engine, so nothing is flattened. See drawSVG().
+          if (rec.svg) {
+            if (tinted) {
+              const tcv = this._tintSVG(rec, dw, dh, tr, tg, tb, c);
+              if (tcv) { c.drawImage(tcv, dx, dy, dw, dh); c.globalAlpha = prevAlpha; return; }
+            }
+            this.drawSVG(c, rec, sx, sy, sw, sh, dx, dy, dw, dh);
+            c.globalAlpha = prevAlpha;
+            return;
+          }
+          if (tinted) {
+            const rcv = this._tintRaster(rec, sx, sy, sw, sh, tr, tg, tb);
+            if (rcv) { c.drawImage(rcv, dx, dy, dw, dh); c.globalAlpha = prevAlpha; return; }
+          }
           // sw or sh < 0 is our "use the full source" sentinel — SKSpriteNode
           // passes -1/-1 when no sub-rect is set, and the 9-arg drawImage
           // throws on negative source dimensions, so we route to the 5-arg
@@ -506,7 +721,7 @@ class Runtime {
       // ---- text ----
       txt_width: (font, ptr, len, sizePx, letterSpacing) => {
         const c = this.ctx2d();
-        const s = this.cstr(ptr, len);
+        const s = this.emojify(this.cstr(ptr, len));
         this.applyFont(c, font, sizePx, letterSpacing);
         let w = c.measureText(s).width;
         if (!this.hasLetterSpacing && letterSpacing) {
@@ -522,12 +737,60 @@ class Runtime {
         this._textBaselineMode = mode | 0;
       },
       gfx_draw_text: (font, ptr, len, x, y, sizePx, rgba, letterSpacing) => {
+        this._dcTxt = (this._dcTxt | 0) + 1;
         const c = this.ctx2d();
-        const s = this.cstr(ptr, len);
+        const s = this.emojify(this.cstr(ptr, len));
+        if (!s) return;
+        const mode = this._textBaselineMode | 0;
+        // ---- DPR-aware glyph cache -----------------------------------------
+        // Canvas2D color-emoji fillText is the per-frame hot path; an emoji-heavy
+        // scene re-rasterizing every frame collapses to single-digit fps. We
+        // rasterize each (font|size|baseline|rgba|spacing|deviceScale|string)
+        // once into an offscreen canvas AT DEVICE RESOLUTION, then blit it at
+        // LOGICAL size. The live transform here includes the kit's scale(1,-1)
+        // un-flip, so we read the per-axis scale magnitude (flip-safe, same as
+        // drawSVG) to learn how many device pixels one logical unit covers, and
+        // rasterize at that resolution — no upscale, no blur on retina.
+        // Skip the cache only when we'd need the per-char letter-spacing loop
+        // (no native letterSpacing AND a non-zero spacing); that path falls
+        // through to the verbatim direct-fillText code below.
+        const spaced = !this.hasLetterSpacing && !!letterSpacing;
+        if (!spaced) {
+          const m = c.getTransform();
+          // Per-axis device scale (folds in baseScale+DPR+zoom); hypot ignores
+          // the sign of the flip. Quantize to 1/4-px steps so a steady camera
+          // hits the same cache entry every frame, and clamp to a sane ceiling.
+          const sxDev = Math.hypot(m.a, m.b) || 1;
+          const syDev = Math.hypot(m.c, m.d) || 1;
+          const dsRaw = Math.max(sxDev, syDev);
+          const ds = Math.max(1, Math.min(Math.round(dsRaw * 4) / 4, 16));
+          const key = font + '|' + sizePx + '|' + mode + '|' + (rgba >>> 0) +
+                      '|' + (letterSpacing || 0) + '|' + ds + '|' + s;
+          let rec = this._glyphCache.get(key);
+          if (rec !== undefined) {
+            this._glyphCache.delete(key); this._glyphCache.set(key, rec); // LRU bump
+          } else {
+            rec = this._rasterizeText(font, s, sizePx, mode, rgba, ds) || null;
+            this._glyphCache.set(key, rec);
+            // Evict the least-recently-used entries when over the cap.
+            while (this._glyphCache.size > this._glyphCacheCap) {
+              const oldest = this._glyphCache.keys().next().value;
+              this._glyphCache.delete(oldest);
+            }
+          }
+          if (rec) {
+            // Blit at logical size; the live transform scales it back up 1:1 to
+            // the device pixels it was rasterized at, so it stays crisp.
+            try { c.drawImage(rec.canvas, x + rec.ox, y + rec.oy, rec.dw, rec.dh); }
+            catch (_e) { /* zero-size; ignore */ }
+            return;
+          }
+          // rec === null: rasterize failed — fall through to direct fillText.
+        }
+        // ---- direct fillText fallback (per-char spacing or cache miss) ------
         this.applyFont(c, font, sizePx, letterSpacing);
         c.textAlign = 'left';
         c.fillStyle = this.css(rgba);
-        const mode = this._textBaselineMode | 0;
         // Visual centring (mode 1): Canvas2D 'middle' uses the em-box
         // geometric centre, but emoji glyphs sit a couple of pixels above
         // the em centre, so they read as too-high. Compute the actual ink
@@ -1338,6 +1601,10 @@ class Runtime {
       win_set_title: (ptr, len) => { document.title = this.cstr(ptr, len); },
       win_width: () => LOGICAL_W,
       win_height: () => LOGICAL_H,
+
+      // ---- debug HUD (driven by SKView.showsFPS / showsDrawCount) ----
+      // bit0 = showsFPS (FPS + frame ms), bit1 = showsDrawCount (img/txt counts).
+      dbg_set_overlays: (flags) => { this._overlayFlags = flags | 0; },
       win_request_fullscreen: () => {
         // Gate on document.fullscreenEnabled, not el.webkitRequestFullscreen:
         // iPhone Safari defines webkitRequestFullscreen on canvas but it is a
@@ -1630,12 +1897,73 @@ void main() {
     if (this.hasLetterSpacing) c.letterSpacing = `${letterSpacing || 0}px`;
   }
 
+  // Multiply a raster image record by an RGB tint, masked by the image's own
+  // alpha, into a small per-record LRU cache. Used by gfx_draw_image to apply
+  // SpriteKit's colorBlendFactor / particleColor tint to raster textures.
+  _tintRaster(rec, sx, sy, sw, sh, tr, tg, tb) {
+    const src = rec.source;
+    const sW = src && (src.naturalWidth || src.width), sH = src && (src.naturalHeight || src.height);
+    if (!sW || !sH) return null;
+    const full = (sw < 0 || sh < 0);
+    const ssx = full ? 0 : sx, ssy = full ? 0 : sy;
+    const w = Math.max(1, Math.ceil(full ? sW : sw)), h = Math.max(1, Math.ceil(full ? sH : sh));
+    const key = 'r,' + ssx + ',' + ssy + ',' + w + ',' + h + ',' + tr + ',' + tg + ',' + tb;
+    return this._tintInto(rec, key, src, ssx, ssy, w, h, tr, tg, tb);
+  }
+
+  // Rasterize an SVG record at the destination footprint (reusing svgRaster's
+  // device-pixel sizing), then multiply by the tint and re-mask by its alpha.
+  // The hit particle texture ships as SVG, so this is the path that colours it.
+  _tintSVG(rec, dw, dh, tr, tg, tb, c) {
+    const m = c.getTransform();
+    const scaleX = Math.hypot(m.a, m.b) || 1, scaleY = Math.hypot(m.c, m.d) || 1;
+    const base = this.svgRaster(rec, Math.ceil(dw * scaleX), Math.ceil(dh * scaleY));
+    if (!base || !base.width || !base.height) return null;
+    const key = 's,' + base.width + 'x' + base.height + ',' + tr + ',' + tg + ',' + tb;
+    return this._tintInto(rec, key, base, 0, 0, base.width, base.height, tr, tg, tb);
+  }
+
+  // Shared multiply+remask into a bounded per-record LRU cache.
+  _tintInto(rec, key, src, ssx, ssy, w, h, tr, tg, tb) {
+    if (!rec._tintCache) rec._tintCache = new Map();
+    let cv = rec._tintCache.get(key);
+    if (cv) { rec._tintCache.delete(key); rec._tintCache.set(key, cv); return cv; }
+    cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const cc = cv.getContext('2d');
+    try {
+      cc.drawImage(src, ssx, ssy, w, h, 0, 0, w, h);
+      cc.globalCompositeOperation = 'multiply';
+      cc.fillStyle = `rgb(${tr},${tg},${tb})`;
+      cc.fillRect(0, 0, w, h);
+      cc.globalCompositeOperation = 'destination-in';
+      cc.drawImage(src, ssx, ssy, w, h, 0, 0, w, h);
+    } catch (_e) { return null; }
+    rec._tintCache.set(key, cv);
+    if (rec._tintCache.size > 16) rec._tintCache.delete(rec._tintCache.keys().next().value);
+    return cv;
+  }
+
   // Resolve an asset name to a handle, trying the name verbatim, then with the
   // extension stripped, then the basename. Preload registers all three forms.
   lookupImage(name) {
     let h = this.imageByName.get(name);
     if (h !== undefined) return h;
     h = this.imageByName.get(this.basename(name));
+    if (h !== undefined) return h;
+    // Case-insensitive fallback. The .sks / particle files reference textures by
+    // their imageset name (e.g. particleTexture "blackHole1") but the converted
+    // asset is named after the lowercased PDF ("blackhole1.svg"), so the
+    // black-hole / mini-game-hole level-end effects resolved to handle 0 and
+    // rendered empty. Build a lowercase index once (preload is done by now) and
+    // retry verbatim + basename.
+    if (!this._imageByNameLC) {
+      this._imageByNameLC = new Map();
+      for (const [k, v] of this.imageByName) this._imageByNameLC.set(k.toLowerCase(), v);
+    }
+    h = this._imageByNameLC.get(String(name).toLowerCase());
+    if (h !== undefined) return h;
+    h = this._imageByNameLC.get(this.basename(name).toLowerCase());
     return h !== undefined ? h : 0;
   }
   lookupSound(name) {
@@ -1648,12 +1976,95 @@ void main() {
     let h = this.fontByName.get(name);
     if (h !== undefined) return h;
     h = this.fontByName.get(this.basename(name));
+    if (h !== undefined) return h;
+    // Space/dash/case-insensitive match so "American Typewriter",
+    // "AmericanTypewriter" and "americantypewriter" all hit the same family.
+    h = this.fontByName.get(String(name).replace(/[\s-]/g, '').toLowerCase());
     return h !== undefined ? h : 0;
   }
   basename(path) {
     const base = path.split('/').pop();
     const dot = base.lastIndexOf('.');
     return dot > 0 ? base.slice(0, dot) : base;
+  }
+
+  // ==========================================================================
+  // vector (SVG) textures — lossless, resolution-aware
+  // ==========================================================================
+  // Decode an SVG source string into a vector image record. Keeps the live
+  // <img> (the browser's SVG renderer) plus a per-size raster cache. Ensures an
+  // intrinsic width/height (synthesised from viewBox if the <svg> omits them)
+  // so the game's SKTexture.size matches the source art 1:1.
+  async loadSVG(svgText) {
+    let text = svgText, vw = 0, vh = 0;
+    const vb = text.match(/viewBox\s*=\s*["']\s*[-\d.]+\s+[-\d.]+\s+([-\d.]+)\s+([-\d.]+)/);
+    if (vb) { vw = parseFloat(vb[1]); vh = parseFloat(vb[2]); }
+    const hasW = /<svg[^>]*\swidth\s*=/.test(text), hasH = /<svg[^>]*\sheight\s*=/.test(text);
+    if ((!hasW || !hasH) && vw && vh) {
+      text = text.replace(/<svg/, `<svg width="${vw}" height="${vh}"`);
+    }
+    const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+    const img = new Image();
+    img.src = url;
+    // Image.decode() resolves an SVG <img> in all engines; createImageBitmap on
+    // an SVG blob does NOT (Safari rejects it), which is why we keep the element.
+    try { await img.decode(); }
+    catch (_e) { await new Promise((res) => { img.onload = res; img.onerror = res; }); }
+    img._svgURL = url;   // hold the object URL for the image's lifetime
+    const width = img.naturalWidth || vw || 1, height = img.naturalHeight || vh || 1;
+    return { source: img, width, height, svg: true, _svgCache: new Map() };
+  }
+
+  // Draw an SVG-backed record at the exact device-pixel footprint of the dst
+  // rect (1:1, so no upscaling blur), caching one canvas per size.
+  drawSVG(c, rec, sx, sy, sw, sh, dx, dy, dw, dh) {
+    const m = c.getTransform();
+    const scaleX = Math.hypot(m.a, m.b) || 1;   // baseScale already folds in DPR + zoom
+    const scaleY = Math.hypot(m.c, m.d) || 1;
+    if (sw < 0 || sh < 0) {
+      // Full-source sprite (the common case): rasterize at the dst footprint.
+      const cv = this.svgRaster(rec, Math.ceil(dw * scaleX), Math.ceil(dh * scaleY));
+      c.drawImage(cv, dx, dy, dw, dh);
+    } else {
+      // Sub-rect: rasterize the whole SVG at its footprint scale, then slice.
+      // svgRaster() may quantize the canvas size, so derive the slice scale from
+      // the ACTUAL returned canvas (cv.width/height), not the requested size.
+      const cv = this.svgRaster(rec, Math.ceil(rec.width * scaleX), Math.ceil(rec.height * scaleY));
+      const kx = cv.width / rec.width, ky = cv.height / rec.height;
+      c.drawImage(cv, sx * kx, sy * ky, sw * kx, sh * ky, dx, dy, dw, dh);
+    }
+  }
+
+  // Rasterize a vector record to a canvas at the given device-pixel size, with a
+  // small per-record LRU cache keyed by size so steady-state draws (a sprite at
+  // a fixed size) cost one cached drawImage after the first frame.
+  svgRaster(rec, wDev, hDev) {
+    wDev = Math.max(1, Math.min(wDev | 0, 8192));
+    hDev = Math.max(1, Math.min(hDev | 0, 8192));
+    // Quantize the raster to a power-of-two multiple of the SVG's intrinsic size
+    // (aspect preserved via a single multiplier). A continuously-scaling sprite —
+    // e.g. the white-hole particles that grow every frame — would otherwise ask
+    // for a new exact size each frame, miss the cache, and re-rasterize the SVG
+    // EVERY frame for EVERY particle (the 6-fps sink). Rounding the multiplier UP
+    // keeps quality (raster >= display size; the final drawImage downscales).
+    const base = Math.max(rec.width, rec.height) || 1;
+    const need = Math.max(wDev, hDev);
+    let mult = 1;
+    while (base * mult < need && mult < 64) mult *= 2;
+    wDev = Math.max(1, Math.min(Math.round(rec.width  * mult), 8192));
+    hDev = Math.max(1, Math.min(Math.round(rec.height * mult), 8192));
+    const key = wDev + 'x' + hDev;
+    const cache = rec._svgCache;
+    let cv = cache.get(key);
+    if (cv) { cache.delete(key); cache.set(key, cv); return cv; }   // LRU bump
+    cv = document.createElement('canvas');
+    cv.width = wDev; cv.height = hDev;
+    const cc = cv.getContext('2d');
+    cc.imageSmoothingEnabled = true; cc.imageSmoothingQuality = 'high';
+    try { cc.drawImage(rec.source, 0, 0, wDev, hDev); } catch (_e) { /* img not ready */ }
+    cache.set(key, cv);
+    if (cache.size > 12) cache.delete(cache.keys().next().value);   // bound memory
+    return cv;
   }
 
   // Mirrors bossman-apple's SoundManager.pickBossVoice + bestVoice.
@@ -1835,7 +2246,7 @@ void main() {
     await Promise.all(manifest.fonts.map(async (path) => {
       const family = this.basename(path);
       try {
-        const resp = await fetch(`${ASSET_ROOT}/${path}`);
+        const resp = await fetch(bust(`${ASSET_ROOT}/${path}`));
         const buf = await resp.arrayBuffer();
         const ff = new FontFace(family, buf);
         await ff.load();
@@ -1846,13 +2257,19 @@ void main() {
       } catch (e) { console.warn('font load failed', path, e); }
     }));
 
-    // images: ImageBitmap from each png
+    // images: raster (png/jpg/webp) decode to an ImageBitmap; vector (svg) keeps
+    // a live <img> for lossless, resolution-aware rasterization at draw time
+    // (see loadSVG/drawSVG) so embedded images + clip masks render at full
+    // fidelity and never blur on zoom/HiDPI.
     await Promise.all(manifest.images.map(async (path) => {
       try {
-        const resp = await fetch(`${ASSET_ROOT}/${path}`);
-        const blob = await resp.blob();
-        const bmp = await createImageBitmap(blob);
-        this.images.push({ source: bmp, width: bmp.width, height: bmp.height });
+        const resp = await fetch(bust(`${ASSET_ROOT}/${path}`));
+        if (/\.svg$/i.test(path)) {
+          this.images.push(await this.loadSVG(await resp.text()));
+        } else {
+          const bmp = await createImageBitmap(await resp.blob());
+          this.images.push({ source: bmp, width: bmp.width, height: bmp.height });
+        }
         const handle = this.images.length - 1;
         this.registerName(this.imageByName, path, this.basename(path), handle);
       } catch (e) { console.warn('image load failed', path, e); }
@@ -1862,7 +2279,7 @@ void main() {
     const ctx = this.ensureAudio();
     await Promise.all(manifest.sounds.map(async (path) => {
       try {
-        const resp = await fetch(`${ASSET_ROOT}/${path}`);
+        const resp = await fetch(bust(`${ASSET_ROOT}/${path}`));
         const arr = await resp.arrayBuffer();
         const buf = await ctx.decodeAudioData(arr);
         this.sounds.push(buf);
@@ -1876,7 +2293,7 @@ void main() {
     // basename-without-extension so any caller spelling resolves.
     await Promise.all((manifest.texts || ['levels.json']).map(async (path) => {
       try {
-        const resp = await fetch(`${ASSET_ROOT}/${path}`);
+        const resp = await fetch(bust(`${ASSET_ROOT}/${path}`));
         if (!resp.ok) return;
         const s = await resp.text();
         const base = path.split('/').pop();
@@ -1900,7 +2317,7 @@ void main() {
   // manifest.json lives next to this file (web/) and is regenerated from the
   // native assets tree by build-web.sh, so it never goes stale.
   async discoverAssets() {
-    const manifest = await fetch('manifest.json')
+    const manifest = await fetch(bust('manifest.json'))
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
     if (manifest) return manifest;
@@ -2164,9 +2581,9 @@ void main() {
     // (instantiateStreaming hard-requires it; plain instantiate doesn't care).
     let instance;
     try {
-      ({ instance } = await WebAssembly.instantiateStreaming(fetch(url), imports));
+      ({ instance } = await WebAssembly.instantiateStreaming(fetch(bust(url)), imports));
     } catch (_e) {
-      const bytes = await fetch(url).then((r) => r.arrayBuffer());
+      const bytes = await fetch(bust(url)).then((r) => r.arrayBuffer());
       ({ instance } = await WebAssembly.instantiate(bytes, imports));
     }
     this.exports = instance.exports;
@@ -2183,13 +2600,20 @@ void main() {
     const loop = (t) => {
       const dt = t - last;
       last = t;
+      // Per-frame draw-call counters (reset here, incremented inside gfx_*).
+      this._dcImg = 0; this._dcTxt = 0;
       try {
         this.pollGamepads();        // emit synthetic key events before the frame
+        const t0 = performance.now();
         this.exports.frame(dt);
+        this._frameMs = performance.now() - t0;
       } catch (err) {
         console.error('frame() threw', err);
         return;   // stop the loop on a fatal trap
       }
+      // Smoothed FPS from real rAF delta + live draw-call / frame-time readout.
+      if (dt > 0) this._fps = this._fps ? this._fps * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
+      this.drawFpsOverlay();   // gated internally by the SKView.showsFPS / showsDrawCount flags
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);

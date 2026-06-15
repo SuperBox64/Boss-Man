@@ -100,12 +100,21 @@ enum LevelStore {
     }
 
     // MARK: - Hand-rolled JSON (no Codable, runs on apple + WASI)
+    // Keyed by the level NAME ("Level 1"...) to match the read-only levels.json
+    // asset, so an exported file is a drop-in replacement and shares cleanly.
+    private static func name(forIndex k: Int) -> String {
+        (k >= 0 && k < Levels.levelNames.count) ? Levels.levelNames[k] : "\(k)"
+    }
+    private static func index(forKey key: String) -> Int? {
+        if let i = Levels.levelNames.firstIndex(of: key) { return i }
+        return Int(key)   // legacy: integer-indexed files written before this
+    }
     private static func encode(_ map: [Int: [String]]) -> String {
         let keys = map.keys.sorted()
         if keys.isEmpty { return "{}" }
         var out = "{\n"
         for (i, k) in keys.enumerated() {
-            out += "  \"\(k)\": [\n"
+            out += "  \"\(name(forIndex: k))\": [\n"
             let rows = map[k] ?? []
             for (j, row) in rows.enumerated() {
                 out += "    \"\(jsonEscape(row))\"" + (j < rows.count - 1 ? ",\n" : "\n")
@@ -140,7 +149,7 @@ enum LevelStore {
                 }
             }
             if i < n { i += 1 }
-            if let idx = Int(keyStr) { result[idx] = rows }
+            if let idx = index(forKey: keyStr) { result[idx] = rows }
         }
         return result
     }

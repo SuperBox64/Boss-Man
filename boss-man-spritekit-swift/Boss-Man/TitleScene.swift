@@ -17,7 +17,7 @@ final class TitleScene: SKScene {
     override func didMove(to view: SKView) {
         // The title is nearly static, so render it at 10 fps to keep CPU/GPU low.
         // Game/editor scenes restore 60 fps on the way out (startGame / startEditor).
-        view.preferredFramesPerSecond = 10
+        view.preferredFramesPerSecond = 30
         backgroundColor = SKColor(calibratedRed: 1.0, green: 0.93, blue: 0.34, alpha: 1)
         anchorPoint = .zero
 
