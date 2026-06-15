@@ -20,11 +20,6 @@ nonisolated(unsafe) var view: SKView? = nil
 private func bootBody() {
     let size = CGSize(width: 1184, height: 666)
     let v = SKView()
-    // BossMan's scene-graph z-values (the 2D maze layers + the raycaster
-    // billboards) were authored for per-parent subtree ordering, not Apple's
-    // global absolute-z. Opt this game into per-parent rendering; every other
-    // game on the kit stays on the default (.absoluteZ), which UFO's laser needs.
-    SKView.zOrderMode = .parentRelative
     v.showsFPS = true
     v.shouldCullNonVisibleNodes = true
     v.preferredFramesPerSecond = 60
