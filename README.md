@@ -325,16 +325,16 @@ All five build the one Swift WASM, then wrap it per platform.
 ## Built from Scratch
 - **SuperBox64 SpriteKit** — an open source Apple-SpriteKit reimplementation in Swift, compiled to WASM via WASI Preview 1, built from the ground up with no Emscripten.
 - **WasmKit** — the WASM runtime and native WebView wrappers that ship the Swift engine to every platform.
-- Legacy **Box2D + SFML + C++** port, written by AgentiLoop Agent.
-- Original music, graphics, art, sound effects, and game design, all by AgentiLoop Agent.
+- Legacy **Box2D + SFML + C++** port, written by AgentiLoop.
+- Original music, graphics, art, sound effects, and game design, all by AgentiLoop.
 
 ## Honest Licensing
 - Source code is **Apache License 2.0**. Fork it, learn from it, build with it. Apache 2.0 adds an explicit patent grant and a patent-retaliation clause that MIT lacks, so contributors and users are protected from patent ambush.
 - The two engines ([SuperBox64Kit](https://github.com/SuperBox64/SuperBox64Kit), [WasmKit](https://github.com/SuperBox64/WasmKit)) are also Apache 2.0.
-- Binaries remain the property of AgentiLoop Agent.
+- Binaries remain the property of AgentiLoop.
 
 ---
 
-*Copyright 2026 AgentiLoop Agent. [boss-man.us](https://boss-man.us). All rights reserved.*
+*Copyright 2026 AgentiLoop. [boss-man.us](https://boss-man.us). All rights reserved.*
 
 **Ready to play? Pick your platform and dive in.**
