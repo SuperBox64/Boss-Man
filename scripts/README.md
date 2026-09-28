@@ -38,3 +38,9 @@ Lightweight awk version that checks lengths, the four corner cells, and presence
 ```sh
 scripts/level_check.sh Sources/Boss-Man/Levels.swift
 ```
+
+---
+
+**AgentiLoop:** [agentiloop.ai](https://agentiloop.ai/)
+
+Copyright © 2026 AgentiLoop.ai, a Logos InkPen LLC company. All rights reserved.

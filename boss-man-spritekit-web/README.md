@@ -467,3 +467,9 @@ boss-man-spritekit-web/
 | Audio                 | `SKAction.playSoundFileNamed` + `AVAudioEngine`   | Same — both routed through the kit's Web Audio path     |
 | Game Center           | Real `GKLeaderboard` / `GKAchievement`            | Silent local stub from `import GameKit`                  |
 | Gamepad               | `GCController.extendedGamepad`                   | Same API; the runtime auto-maps d-pad/A→Arrow/Space too |
+
+---
+
+**AgentiLoop:** [agentiloop.ai](https://agentiloop.ai/)
+
+Copyright © 2026 AgentiLoop.ai, a Logos InkPen LLC company. All rights reserved.

@@ -338,3 +338,7 @@ All five build the one Swift WASM, then wrap it per platform.
 *Copyright 2026 AgentiLoop. [boss-man.us](https://boss-man.us). All rights reserved.*
 
 **Ready to play? Pick your platform and dive in.**
+
+---
+
+**AgentiLoop:** [agentiloop.ai](https://agentiloop.ai/)

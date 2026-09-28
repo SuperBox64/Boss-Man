@@ -39,3 +39,9 @@ Selects each mode by seeding `localStorage BossMan.mazeZoom` (0 wide, 1 zoom,
 run per mode (grid moves for 2D/ISO; forward/turn/fire plus a hold-reverse
 regression for RAY/VOXEL), and writes four screenshots per mode plus
 `modes-report.json` with console errors and a freeze probe.
+
+---
+
+**AgentiLoop:** [agentiloop.ai](https://agentiloop.ai/)
+
+Copyright © 2026 AgentiLoop.ai, a Logos InkPen LLC company. All rights reserved.
