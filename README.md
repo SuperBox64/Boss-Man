@@ -5,7 +5,7 @@
 
 # Boss-Man
 
-🤖 **Built by the makers of [Agent!](https://github.com/AgentiLoop/Agent)**, an autonomous macOS agent.
+🤖 **Built by the makers of [Agent!](https://github.com/AgentiLoop/Agent)**, an autonomous macOS agent. 🌐 [agentiloop.ai](https://agentiloop.ai)
 
 
 The office maze arcade game, runs on Mac, Windows, Linux, Web (mobile friendly), and Android. An *Office Space* inspired maze game built in Swift using **SuperBox64 SpriteKit** — an open source reimplementation of Apple's SpriteKit, compiled to WebAssembly via WASI Preview 1 and wrapped in a native WebView on every platform.
